@@ -1,0 +1,159 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring-apps
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production-apps
+---
+# ServiceAccount for Grafana (monitoring)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: monitoringsvc
+  namespace: monitoring-apps
+---
+# ClusterRole with the exact privileges requested
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: privileged
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["create"]
+---
+# ClusterRoleBinding assigning the ClusterRole to the monitoring SA
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: privileged
+subjects:
+  - kind: ServiceAccount
+    name: monitoringsvc
+    namespace: monitoring-apps
+roleRef:
+  kind: ClusterRole
+  name: privileged
+  apiGroup: rbac.authorization.k8s.io
+---
+# Default namespace Ubuntu pod (multi-arch; works on aarch64)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu-endpoint
+  namespace: default
+spec:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  containers:
+    - name: ubuntu
+      image: ubuntu:22.04
+      imagePullPolicy: IfNotPresent
+      command: ["bash","-lc","sleep infinity"]
+      tty: true
+      stdin: true
+---
+# Provisioning ConfigMap to auto-add the TestData DB data source (needed for CVE-2021-43815)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+  namespace: monitoring-apps
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: TestData
+        type: testdata
+        access: proxy
+        isDefault: true
+---
+# Grafana Enterprise 8.3.0 pod in monitoring namespace, using the privileged SA
+apiVersion: v1
+kind: Pod
+metadata:
+  name: grafana
+  namespace: monitoring-apps
+  labels:
+    app: grafana
+spec:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  serviceAccountName: monitoringsvc
+  containers:
+    - name: grafana
+      image: grafana/grafana-enterprise:8.3.0
+      imagePullPolicy: IfNotPresent
+      env:
+        - name: GF_SECURITY_ADMIN_USER
+          value: "superadmin"
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          value: "Admin12"
+        # Make sure provisioning dir is picked up
+        - name: GF_PATHS_PROVISIONING
+          value: /etc/grafana/provisioning
+      ports:
+        - name: http
+          containerPort: 3000
+      volumeMounts:
+        - name: prov
+          mountPath: /etc/grafana/provisioning/datasources
+  volumes:
+    - name: prov
+      configMap:
+        name: grafana-provisioning
+---
+# NodePort service to reach Grafana from the host easily
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring-apps
+spec:
+  type: NodePort
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: 30000
+---
+# Simple pod in production-apps with a file 'secrets.txt' in the container FS
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prod-app
+  namespace: production-apps
+spec:
+  nodeSelector:
+    kubernetes.io/arch: arm64
+  volumes:
+    - name: work
+      emptyDir: {}
+  initContainers:
+    - name: init-secrets
+      image: busybox:1.36
+      command: ["sh","-c","echo 'top secret' > /work/secrets.txt && ls -l /work"]
+      volumeMounts:
+        - name: work
+          mountPath: /work
+  containers:
+    - name: app
+      image: ubuntu:22.04
+      command: ["bash","-lc","sleep infinity"]
+      volumeMounts:
+        - name: work
+          mountPath: /work
